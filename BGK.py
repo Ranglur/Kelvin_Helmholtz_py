@@ -3,7 +3,8 @@ import numpy as np
 
 
 class BGK_D2Q9_Diffusion_Advection:    
-    def __init__(self, lattice_dimensions: np.ndarray, omega: float, alpha: float = 0.0):
+    # Setup methods
+    def __init__(self, lattice_dimensions: np.ndarray, omega: float, omega_d: float, alpha: float = 0.0):
         # D2Q9 weights and velocities
         self.W = np.array([4/9] + [1/9]*4 + [1/36]*4)
         self.c_int = np.array([[0, 0],[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [-1, -1], [1, -1]], dtype=int)
@@ -23,6 +24,27 @@ class BGK_D2Q9_Diffusion_Advection:
         # Forcing term
         self.F = np.zeros(shape=(lattice_dimensions[0], lattice_dimensions[1], 2))
         self.omega = omega
+        self.omega_d = omega_d
+        self.g = np.array([0.0, 9.81])
+        self.alpha = alpha
+    
+    def initialize_from_initial_conditions(self, u: np.ndarray, C_init: np.ndarray):
+        # Need to initialize C[i] and N[i] from the lattice
+        # averages of u and C_init
+        
+        #C[i] must satisfy:
+        # C_init(x,y) = sum_i C_i(x,y)
+        self.C = np.random.rand(9, self.lattice_dimensions[0], self.lattice_dimensions[1])   
+        C_avg = np.sum(self.C, axis=0)
+        self.C *= C_init[np.newaxis, :, :] / C_avg[np.newaxis, :, :]
+        
+        # N[i] must satisfy: 
+        # u = sum_i c_i * N_i / sum_i N_i
+        
+        
+        
+        
+        pass
     # Equilibrium distribution functions
     # ---------------------------------
     def compute_equilibrium(self):  
@@ -47,11 +69,14 @@ class BGK_D2Q9_Diffusion_Advection:
     # Collision steps
     # ---------------
     def collision_step(self):
-        self.N += -self.omega*(self.N - self.N_eq) - self.W[:, np.newaxis, np.newaxis] * np.einsum("ia,xya->ixy", self.c, self.F)
+        # F = alpha*rho*g*C
+        F = self.alpha * self.rho[:, :, np.newaxis] * self.g[np.newaxis, np.newaxis, :] * self.C
+        
+        self.N += -self.omega*(self.N - self.N_eq) - self.W[:, np.newaxis, np.newaxis] * np.einsum("ia,xya->ixy", self.c, F)
         pass
         
     def collision_step_C(self):
-        self.C += -self.omega*(self.C - self.C_eq)
+        self.C += -self.omega_d*(self.C - self.C_eq)
         pass
     
     # Propagation steps
@@ -107,6 +132,41 @@ class BGK_D2Q9_Diffusion_Advection:
             N_t[i+1] = self.N.copy()
             C_t[i+1] = self.N.copy()
         return N_t, C_t
+
+def nu2w(nu: float) -> float:
+    """Convert kinematic viscosity to relaxation parameter omega."""
+    return 1 /(3*nu) + 1/6
+
+def D2omega_d(D: float) -> float:
+    """Convert diffusion coefficient to relaxation parameter omega."""
+    return 1/(3*D) + 1/6
+
+def problem_1():
+    Lattice_dimensions = np.array([200, 200])
+    delta = 5
+    U = 0.1
+    u_0y = 10e-5
+    k = 2*np.pi /( Lattice_dimensions[0]/10)
+    c_0 = 1.0
+    X,Y = np.meshgrid(np.arange(Lattice_dimensions[0]), np.arange(Lattice_dimensions[1]))
+    
+    u_x = U*(np.tanh((Y - 0.25*Lattice_dimensions[0])/delta) - np.tanh((Y - 0.75*Lattice_dimensions[0])/delta) - 1)
+    u_y = u_0y * (np.sin(2*np.pi*X/Lattice_dimensions[0]))
+    u_0 = np.zeros(shape=(Lattice_dimensions[0], Lattice_dimensions[1], 2))
+    u_0[:, :, 0] = u_x
+    u_0[:, :, 1] = u_y
+    
+    
+    C_0 = c_0*(np.tanh((Y - 0.25*Lattice_dimensions[0])/delta) - np.tanh((Y - 0.75*Lattice_dimensions[0])/delta))
+    
+    w = nu2w(nu=0.01)
+    w_d = D2omega_d(D=0.01)
+    # Not included in the problem description
+    alpha = 0.1
+    
+    System = BGK_D2Q9_Diffusion_Advection(lattice_dimensions=Lattice_dimensions, omega=w, omega_d=w_d, alpha=alpha)
+    System.initialize_from_initial_conditions(u=u_0, C_init=C_0)
+    
 
 if __name__ == "__main__":
     pass
