@@ -1,5 +1,5 @@
 import numpy as np
-
+import matplotlib.pyplot as plt
 
 
 class BGK_D2Q9_Diffusion_Advection:    
@@ -13,6 +13,7 @@ class BGK_D2Q9_Diffusion_Advection:
         self.N = np.zeros(shape=(9, lattice_dimensions[0], lattice_dimensions[1]))
         self.N_eq = np.zeros_like(self.N)   
         self.C = np.zeros(shape=(9, lattice_dimensions[0], lattice_dimensions[1]))
+        self.C_avg = np.zeros(shape=(lattice_dimensions[0], lattice_dimensions[1]))
         self.C_eq = np.zeros_like(self.C)   
         self.Q_iab = np.zeros(shape=(9, 2, 2))
         
@@ -28,28 +29,55 @@ class BGK_D2Q9_Diffusion_Advection:
         self.g = np.array([0.0, 9.81])
         self.alpha = alpha
     
-    def initialize_from_initial_conditions(self, u: np.ndarray, C_init: np.ndarray):
-        # Need to initialize C[i] and N[i] from the lattice
-        # averages of u and C_init
+    def initialize_from_initial_conditions(self, u: np.ndarray, C_init: np.ndarray, rho = 1.0):
+        """
+        Initialize distributions from macroscopic fields.
+
+        Standard LBM practice for underdetermined u→N_i is to set the
+        populations to their equilibrium with a chosen density field (often
+        constant). Likewise for the passive scalar, set C_i to scalar-equilibrium.
+
+        Parameters
+        - u: array (Nx, Ny, 2), initial velocity field
+        - C_init: array (Nx, Ny), initial scalar (concentration/temperature)
+        - rho: float or array (Nx, Ny), initial density (default 1.0)
+        """
+        # Shape checks (lightweight)
+        Nx, Ny = self.lattice_dimensions
+        assert u.shape == (Nx, Ny, 2), f"u must have shape {(Nx, Ny, 2)}, got {u.shape}"
+        assert C_init.shape == (Nx, Ny), f"C_init must have shape {(Nx, Ny)}, got {C_init.shape}"
+
+        # Set macroscopic fields
+        if np.isscalar(rho):
+            self.rho = np.full((Nx, Ny), float(rho))
+        else:
+            assert rho.shape == (Nx, Ny), f"rho must be scalar or shape {(Nx, Ny)}"
+            self.rho = rho.astype(float)
+        self.u = u.astype(float)
+        self.C_avg = C_init.astype(float)
+
+        # Calculates equilibrium distribution N_eq
+        self.compute_equilibrium()
+        self.compute_C_eq()
         
-        #C[i] must satisfy:
-        # C_init(x,y) = sum_i C_i(x,y)
-        self.C = np.random.rand(9, self.lattice_dimensions[0], self.lattice_dimensions[1])   
-        C_avg = np.sum(self.C, axis=0)
-        self.C *= C_init[np.newaxis, :, :] / C_avg[np.newaxis, :, :]
-        
-        # N[i] must satisfy: 
-        # u = sum_i c_i * N_i / sum_i N_i
-        
-        
-        
-        
-        pass
-    # Equilibrium distribution functions
-    # ---------------------------------
-    def compute_equilibrium(self):  
+        # Set distributions to equilibrium
+        self.N = self.N_eq.copy()
+        self.C = self.C_eq.copy()
+
+    # Macroscopic field computations
+    # ----------------------------
+    def compute_Macroscopic_fields(self):
         self.rho = np.sum(self.N, axis=0)
         self.u = np.einsum("ia,ixy->xya", self.c, self.N) / self.rho[:, :, np.newaxis]
+        self.C_avg = np.sum(self.C, axis=0)
+
+
+
+    # Equilibrium distribution functions
+    # ---------------------------------
+    
+    # Verified without for loops, produce same result as with for loops
+    def compute_equilibrium(self):  
 
         # N_i(x,y) = W_i*rho(x,y)*[1 + 3(c_i*u(x,y)) + 3Q_iab*u_a(x,y)*u_b(x,y)]
 
@@ -57,24 +85,33 @@ class BGK_D2Q9_Diffusion_Advection:
         uu = np.einsum("xya, xyb->xyab", self.u, self.u)  # u_a(x,y) * u_b(x,y)
         Q_uu = np.einsum("iab, xyab->ixy", self.Q_iab, uu)  # Q_iab * u_a(x,y) * u_b(x,y)
         self.N_eq = self.W[:, np.newaxis, np.newaxis] * self.rho[np.newaxis, :, :] * (
-            1 + 3 * cu + 4.5 * cu**2 - 1.5 * np.einsum("xya,xya->xy", self.u, self.u)[np.newaxis, :, :] + 4.5 * Q_uu
+            1 + 3 * cu + 1.5 * np.einsum("xya,xya->xy", self.u, self.u)[np.newaxis, :, :] + 4.5 * Q_uu
         )
+
         
+
+
     def compute_C_eq(self):
-        # C_i(x,y) = W_i*[1 + 3(c_i*U(x,y))]
-        self.C_eq = self.W[:, np.newaxis, np.newaxis] * (
+        #self.C_avg = np.sum(self.C, axis=0)
+        self.C_eq = self.C_avg[np.newaxis, :, :]*self.W[:, np.newaxis, np.newaxis] * (
             1 + 3 * np.einsum("ia,xya->ixy", self.c, self.u)
-        )
+        ) 
     
     # Collision steps
     # ---------------
+    # Verified without for loops, produce same result as with for loops
     def collision_step(self):
         # F = alpha*rho*g*C
-        F = self.alpha * self.rho[:, :, np.newaxis] * self.g[np.newaxis, np.newaxis, :] * self.C
+        F = self.alpha * self.rho[:, :, np.newaxis] * self.g[np.newaxis, np.newaxis, :] * self.C_avg[:, :, np.newaxis]
         
-        self.N += -self.omega*(self.N - self.N_eq) - self.W[:, np.newaxis, np.newaxis] * np.einsum("ia,xya->ixy", self.c, F)
+        # N_i(x,y) += -omega*(N_i(x,y) - N_eq_i(x,y)) + 3*W_i*c_i*F(x,y)
+        self.N += -self.omega*(self.N - self.N_eq) + 3*self.W[:, np.newaxis, np.newaxis] * np.einsum("ia,xya->ixy", self.c, F)
         pass
         
+    # Collision step for N_i without with for loops
+
+
+
     def collision_step_C(self):
         self.C += -self.omega_d*(self.C - self.C_eq)
         pass
@@ -111,9 +148,14 @@ class BGK_D2Q9_Diffusion_Advection:
         # Steps for BGK iteration:
         # --------------------------
         # Compute N_eq, rho and u
-        self.compute_equilibrium()
+        self.compute_Macroscopic_fields() # Verified
+        self.compute_equilibrium() # Verified
+        
+
+        self.compute_C_eq()
+
         # Colision steps
-        self.collision_step()
+        self.collision_step() # Verified
         self.collision_step_C()
         # propagation steps
         propagation_step_method()
@@ -121,25 +163,64 @@ class BGK_D2Q9_Diffusion_Advection:
         pass
     
     def Simulate_BGK(self, num_iterations: int):
-        N_t = np.zeros(shape=(1+num_iterations, *self.N.shape))
-        C_t = np.zeros(shape=(1+num_iterations, *self.N.shape))
+        """
+        Simulate the BGK model for a given number of iterations.
+        Parameters
+        ----------
+        num_iterations : int
+            Number of iterations to simulate.
         
-        N_t[0] = self.N.copy()
-        C_t[0] = self.N.copy()
+        Returns
+        -------
+        u_t : array (num_iterations+1, Nx, Ny, 2)
+            Velocity field at each time step.
+        C_t : array (num_iterations+1, Nx, Ny)
+            Scalar field at each time step.
+        """
+        
+        u_t = np.zeros(shape=(1+num_iterations, self.lattice_dimensions[0], self.lattice_dimensions[1], 2))
+        C_t = np.zeros(shape=(1+num_iterations, self.lattice_dimensions[0], self.lattice_dimensions[1]))
+        
+        u_t[0] = self.u.copy()
+        C_t[0] = np.sum(self.C, axis=0)
         
         for i in range(num_iterations):
             self.iterate_BGK()  
-            N_t[i+1] = self.N.copy()
-            C_t[i+1] = self.N.copy()
-        return N_t, C_t
+            u_t[i+1] = self.u.copy()
+            C_t[i+1] = np.sum(self.C, axis=0)
+        return u_t, C_t
+    
+    def plot_u(self):
+                # plot the initial velocity field with quiver
+        X, Y = np.meshgrid(np.arange(self.lattice_dimensions[0]), np.arange(self.lattice_dimensions[1]))
+        
+        plt.figure(figsize=(8, 6))
+        plt.quiver(X[::5, ::5], Y[::5, ::5], self.u[::5, ::5, 0], self.u[::5, ::5, 1], color='r')
+        plt.title('Initial Velocity Field')
+        plt.xlabel('X')
+        plt.ylabel('Y')
+        plt.axis('equal')
+        plt.show()
+
+    def plot_C(self):
+        C_avg = np.sum(self.C, axis=0)
+        plt.imshow(C_avg.T, origin='lower', cmap='viridis')
+        plt.colorbar(label='Concentration')
+        plt.title('Scalar Field Concentration')
+        plt.xlabel('X')
+        plt.ylabel('Y')
+        plt.show()
+
+
 
 def nu2w(nu: float) -> float:
     """Convert kinematic viscosity to relaxation parameter omega."""
-    return 1 /(3*nu) + 1/6
+    return 1/(3*nu + 0.5)
 
 def D2omega_d(D: float) -> float:
     """Convert diffusion coefficient to relaxation parameter omega."""
-    return 1/(3*D) + 1/6
+    return 1/(3*D + 0.5)
+
 
 def problem_1():
     Lattice_dimensions = np.array([200, 200])
@@ -162,11 +243,22 @@ def problem_1():
     w = nu2w(nu=0.01)
     w_d = D2omega_d(D=0.01)
     # Not included in the problem description
-    alpha = 0.1
+    alpha = 0.0 
     
     System = BGK_D2Q9_Diffusion_Advection(lattice_dimensions=Lattice_dimensions, omega=w, omega_d=w_d, alpha=alpha)
     System.initialize_from_initial_conditions(u=u_0, C_init=C_0)
-    
+
+
+
+
+    for i in range(10):        
+        u_t, C_t = System.Simulate_BGK(num_iterations=100)
+
+        System.plot_u()
+        System.plot_C()
+
 
 if __name__ == "__main__":
+    problem_1()
+
     pass
