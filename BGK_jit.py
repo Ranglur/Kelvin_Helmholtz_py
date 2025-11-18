@@ -7,6 +7,14 @@ from typing import NamedTuple
 import jax
 import functools
 
+jax.config.update("jax_enable_x64", True)
+
+
+# Data structure to hold the state of the BGK model. Necessary for JAX JIT compilation, 
+# as JAX requires immutable data structures. More complex than a simple class, but it 
+# makes the jax an order of magnitude faster. Apart from the strict non-mutation requirement,
+# Jax.numpy are essentially the same as numpy arrays.
+
 class BGKState(NamedTuple):
     # Microscopic distribution functions
     N: jnp.ndarray
@@ -22,12 +30,18 @@ class BGKState(NamedTuple):
 class BGK_D2Q9_Diffusion_Advection:    
     # Setup methods
     def __init__(self, lattice_dimensions: jnp.ndarray, omega: float, omega_d: float, alpha: float = 0.0, bc: str = 'periodic'):
-        # D2Q9 weights and velocities
+        # D2Q9 weights and velocities. These are constant, and are therefore immutable.
         self.W = jnp.array([4/9] + [1/9]*4 + [1/36]*4)
         self.c_int = jnp.array([[0, 0],[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [-1, -1], [1, -1]], dtype=int)
         self.c = self.c_int.astype(float)
         self.lattice_dimensions = lattice_dimensions
-        
+        self.omega = omega
+        self.omega_d = omega_d
+        self.g = jnp.array([0.0, -9.81])
+        self.alpha = alpha
+        self.set_bcs(bc)
+
+        # Mutable variables, need to be stored in state for JAX JIT     
         self.state = BGKState(
             N = jnp.zeros(shape=(9, lattice_dimensions[0], lattice_dimensions[1])),
             N_eq =  jnp.zeros(shape=(9, lattice_dimensions[0], lattice_dimensions[1])),   
@@ -42,11 +56,7 @@ class BGK_D2Q9_Diffusion_Advection:
         
 
 
-        self.omega = omega
-        self.omega_d = omega_d
-        self.g = jnp.array([0.0, -9.81])
-        self.alpha = alpha
-        self.set_bcs(bc)
+
     
     def initialize_from_initial_conditions(self, u: jnp.ndarray, C_init: jnp.ndarray, rho : float = 1.0, rho_array: jnp.ndarray = jnp.zeros((0,0))):
         """
@@ -85,6 +95,7 @@ class BGK_D2Q9_Diffusion_Advection:
 
     # Macroscopic field computations
     # ----------------------------
+    @functools.partial(jax.jit, static_argnums=0)
     def compute_Macroscopic_fields(self, state: BGKState) -> BGKState:
         rho = jnp.sum(state.N, axis=0)
         u = jnp.einsum("ia,ixy->xya", self.c, state.N) / rho[:, :, jnp.newaxis]
@@ -96,7 +107,7 @@ class BGK_D2Q9_Diffusion_Advection:
     # Equilibrium distribution functions
     # ---------------------------------
     
-    # Verified without for loops, produce same result as with for loops
+    @functools.partial(jax.jit, static_argnums=0)
     def compute_equilibrium(self, state: BGKState) -> BGKState:  
 
         # N_i(x,y) = W_i*rho(x,y)*[1 + 3(c_i*u(x,y)) + 3Q_iab*u_a(x,y)*u_b(x,y)]
@@ -110,18 +121,19 @@ class BGK_D2Q9_Diffusion_Advection:
         
         return state._replace(N_eq=N_eq)
 
+    @functools.partial(jax.jit, static_argnums=0)
     def compute_C_eq(self, state: BGKState) -> BGKState:
         #self.C_avg = jnp.sum(self.C, axis=0)
         # C_eq_i = W_i * C_avg * (1 + 3*c_i·u)
         
-        C_eq = self.state.C_avg[jnp.newaxis, :, :]*self.W[:, jnp.newaxis, jnp.newaxis] * (
-            1 + 3 * jnp.einsum("ia,xya->ixy", self.c, self.state.u)
+        C_eq = state.C_avg[jnp.newaxis, :, :]*self.W[:, jnp.newaxis, jnp.newaxis] * (
+            1 + 3 * jnp.einsum("ia,xya->ixy", self.c, state.u)
         ) 
         return state._replace(C_eq=C_eq)
     
     # Collision steps
     # ---------------
-    # Verified without for loops, produce same result as with for loops
+    @functools.partial(jax.jit, static_argnums=0)
     def collision_step(self, state: BGKState) -> BGKState:
         # F = alpha*rho*g*C
         F = self.alpha * state.rho[:, :, jnp.newaxis] * self.g[jnp.newaxis, jnp.newaxis, :] * state.C_avg[:, :, jnp.newaxis]
@@ -131,20 +143,20 @@ class BGK_D2Q9_Diffusion_Advection:
         return state._replace(N=N)
         
 
-
-
-
+    @functools.partial(jax.jit, static_argnums=0)
     def collision_step_C(self, state: BGKState) -> BGKState:
         C = state.C -self.omega_d*(state.C - state.C_eq)
         return state._replace(C=C)
     
     # Propagation steps
     # -----------------
+    @functools.partial(jax.jit, static_argnums=0)
     def propagation_step_periodic(self, state: BGKState) -> BGKState:
         for i in range(9):    
             state = state._replace(N=state.N.at[i].set(jnp.roll(state.N[i], shift=self.c_int[i], axis=(0, 1))))
         return state
     
+    @functools.partial(jax.jit, static_argnums=0)
     def propagation_step_C_periodic(self, state: BGKState) -> BGKState:
         for i in range(9):
             state = state._replace(C=state.C.at[i].set(jnp.roll(state.C[i], shift=self.c_int[i], axis=(0, 1))))
@@ -167,11 +179,26 @@ class BGK_D2Q9_Diffusion_Advection:
         state = self.propagation_step_C_periodic(state)
         return self.compute_Macroscopic_fields(state)
     
+    @functools.partial(jax.jit, static_argnums=0)
+    def step_no_slip(self, state: BGKState) -> BGKState:
+        state = self.compute_equilibrium(state)
+        state = self.compute_C_eq(state)
+        state = self.collision_step(state)
+        state = self.collision_step_C(state)
+        state = self.propagation_step_noslip(state)
+        state = self.propagation_step_C_noslip(state)
+        return self.compute_Macroscopic_fields(state)
+
     # Iteration step for BGK model
-    def iterate_BGK(self, bc_type = 'periodic'):
+    def iterate_BGK_periodic(self):
         self.state = self.step_periodic(self.state)
         pass
+
+    def iterate_BGK_no_slip(self):
+        self.state = self.step_no_slip(self.state)
+        pass
     
+    #@functools.partial(jax.jit, static_argnums=0)
     def Simulate_BGK(self, num_iterations: int, save_interval: int = 1):
         """
         Simulate the BGK model for a given number of iterations.
@@ -187,32 +214,29 @@ class BGK_D2Q9_Diffusion_Advection:
         C_t : array (num_iterations+1, Nx, Ny)
             Scalar field at each time step.
         """
+        bcs = ['periodic', 'noslip']        
+        itr_funcs = [self.iterate_BGK_periodic, self.iterate_BGK_no_slip]        
         
-        saved_frames = num_iterations // save_interval + 1
-        
-        u_t = np.zeros(shape=(0, self.lattice_dimensions[0], self.lattice_dimensions[1], 2))
-        C_t = np.zeros(shape=(0, self.lattice_dimensions[0], self.lattice_dimensions[1]))
+        u_t = jnp.zeros(shape=(0, self.lattice_dimensions[0], self.lattice_dimensions[1], 2))
+        C_t = jnp.zeros(shape=(0, self.lattice_dimensions[0], self.lattice_dimensions[1]))
 
         u_t = jnp.append(u_t, self.state.u.copy()[jnp.newaxis, ...], axis=0)
         C_t = jnp.append(C_t, self.state.C_avg.copy()[jnp.newaxis, ...], axis=0)
         
-    
-        
+        itr_func = itr_funcs[bcs.index(self.bc)]
         for i in tqdm(range(num_iterations)):
             if (i+1) % save_interval == 0:
-                frame_index = (i+1) // save_interval
                 u_t = jnp.append(u_t, self.state.u.copy()[jnp.newaxis, ...], axis=0)
                 C_t = jnp.append(C_t, self.state.C_avg.copy()[jnp.newaxis, ...], axis=0)
-            self.iterate_BGK()  
+            itr_func()  
         return u_t, C_t
 
     
     def set_bcs(self, bc: str):
         bc_types = ['periodic', 'noslip']
-        bc_methods = [[self.propagation_step_periodic, self.propagation_step_C_periodic],
-                        [self.propagation_step_noslip, self.propagation_step_C_noslip]]
-        assert bc in bc_types, f"bc must be one of {bc_types}"  
-        self.propagation_step_methods = bc_methods[bc_types.index(bc)]
+        assert bc in bc_types, f"bc must be one of {bc_types}"
+        self.bc = bc
+
     
     
     def plot_u(self):
@@ -333,7 +357,7 @@ def problem_1():
     System.initialize_from_initial_conditions(u=u_0, C_init=C_0)
 
     # Too many frames to store all, so save every 100th frame
-    u_t, C_t = System.Simulate_BGK(num_iterations=5000, save_interval=100)
+    u_t, C_t = System.Simulate_BGK(num_iterations=50000, save_interval=100)
     
     animate_u_t(u_t, fps=5, time_step_per_frame=100)
     animate_C_t(C_t, fps=5, time_step_per_frame=100)
