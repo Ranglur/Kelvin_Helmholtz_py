@@ -1,36 +1,54 @@
+import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from tqdm import tqdm
+from typing import NamedTuple
+import jax
+import functools
+
+class BGKState(NamedTuple):
+    # Microscopic distribution functions
+    N: jnp.ndarray
+    N_eq: jnp.ndarray
+    C: jnp.ndarray
+    C_eq: jnp.ndarray
+    # Macroscopic fields
+    rho: jnp.ndarray
+    u: jnp.ndarray
+    C_avg: jnp.ndarray
+
 
 class BGK_D2Q9_Diffusion_Advection:    
     # Setup methods
-    def __init__(self, lattice_dimensions: np.ndarray, omega: float, omega_d: float, alpha: float = 0.0, bc: str = 'periodic'):
+    def __init__(self, lattice_dimensions: jnp.ndarray, omega: float, omega_d: float, alpha: float = 0.0, bc: str = 'periodic'):
         # D2Q9 weights and velocities
-        self.W = np.array([4/9] + [1/9]*4 + [1/36]*4)
-        self.c_int = np.array([[0, 0],[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [-1, -1], [1, -1]], dtype=int)
+        self.W = jnp.array([4/9] + [1/9]*4 + [1/36]*4)
+        self.c_int = jnp.array([[0, 0],[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [-1, -1], [1, -1]], dtype=int)
         self.c = self.c_int.astype(float)
-
-         
         self.lattice_dimensions = lattice_dimensions
-        self.N = np.zeros(shape=(9, lattice_dimensions[0], lattice_dimensions[1]))
-        self.N_eq = np.zeros_like(self.N)   
-        self.C = np.zeros(shape=(9, lattice_dimensions[0], lattice_dimensions[1]))
-        self.C_avg = np.zeros(shape=(lattice_dimensions[0], lattice_dimensions[1]))
-        self.C_eq = np.zeros_like(self.C)   
-        self.Q_iab = (3/2)*np.einsum("ia, ib->iab", self.c, self.c) - (1/2)*np.eye(2)[np.newaxis, :, :]
-        self.u = np.zeros(shape=(lattice_dimensions[0], lattice_dimensions[1], 2))
-        self.rho = np.zeros(shape=(lattice_dimensions[0], lattice_dimensions[1]))
         
-        # Forcing term
-        self.F = np.zeros(shape=(lattice_dimensions[0], lattice_dimensions[1], 2))
+        self.state = BGKState(
+            N = jnp.zeros(shape=(9, lattice_dimensions[0], lattice_dimensions[1])),
+            N_eq =  jnp.zeros(shape=(9, lattice_dimensions[0], lattice_dimensions[1])),   
+            C = jnp.zeros(shape=(9, lattice_dimensions[0], lattice_dimensions[1])),
+            C_avg = jnp.zeros(shape=(lattice_dimensions[0], lattice_dimensions[1])),
+            C_eq = jnp.zeros(shape=(9, lattice_dimensions[0], lattice_dimensions[1])),   
+            u = jnp.zeros(shape=(lattice_dimensions[0], lattice_dimensions[1], 2)),
+            rho = jnp.zeros(shape=(lattice_dimensions[0], lattice_dimensions[1]))
+        )
+
+        self.Q_iab = (3/2)*jnp.einsum("ia, ib->iab", self.c, self.c) - (1/2)*jnp.eye(2)[jnp.newaxis, :, :]
+        
+
+
         self.omega = omega
         self.omega_d = omega_d
-        self.g = np.array([0.0, -9.81])
+        self.g = jnp.array([0.0, -9.81])
         self.alpha = alpha
         self.set_bcs(bc)
     
-    def initialize_from_initial_conditions(self, u: np.ndarray, C_init: np.ndarray, rho : float = 1.0, rho_array: np.ndarray = np.zeros((0,0))):
+    def initialize_from_initial_conditions(self, u: jnp.ndarray, C_init: jnp.ndarray, rho : float = 1.0, rho_array: jnp.ndarray = jnp.zeros((0,0))):
         """
         Initialize distributions from macroscopic fields.
 
@@ -50,26 +68,28 @@ class BGK_D2Q9_Diffusion_Advection:
 
         # Set macroscopic fields
         if rho_array.shape != (self.lattice_dimensions[0], self.lattice_dimensions[1]):
-            self.rho = np.full((Nx, Ny), rho)
+            rho_helper = jnp.full((Nx, Ny), rho)
         else:
-            self.rho = rho_array.astype(float)
-        self.u = u.astype(float)
-        self.C_avg = C_init.astype(float)
+            rho_helper = rho_array.astype(float)
+
+        self.state = self.state._replace(rho=rho_helper, u=u, C_avg=C_init)
 
         # Calculates equilibrium distribution N_eq
-        self.compute_equilibrium()
-        self.compute_C_eq()
+        self.state = self.compute_equilibrium(self.state)
+        self.state = self.compute_C_eq(self.state)
         
         # Set distributions to equilibrium
-        self.N = self.N_eq.copy()
-        self.C = self.C_eq.copy()
+        self.state = self.state._replace(N=self.state.N_eq.copy(), C=self.state.C_eq.copy())
+
+    
 
     # Macroscopic field computations
     # ----------------------------
-    def compute_Macroscopic_fields(self):
-        self.rho = np.sum(self.N, axis=0)
-        self.u = np.einsum("ia,ixy->xya", self.c, self.N) / self.rho[:, :, np.newaxis]
-        self.C_avg = np.sum(self.C, axis=0)
+    def compute_Macroscopic_fields(self, state: BGKState) -> BGKState:
+        rho = jnp.sum(state.N, axis=0)
+        u = jnp.einsum("ia,ixy->xya", self.c, state.N) / rho[:, :, jnp.newaxis]
+        C_avg = jnp.sum(state.C, axis=0)
+        return state._replace(rho=rho, u=u, C_avg=C_avg)
 
 
 
@@ -77,85 +97,79 @@ class BGK_D2Q9_Diffusion_Advection:
     # ---------------------------------
     
     # Verified without for loops, produce same result as with for loops
-    def compute_equilibrium(self):  
+    def compute_equilibrium(self, state: BGKState) -> BGKState:  
 
         # N_i(x,y) = W_i*rho(x,y)*[1 + 3(c_i*u(x,y)) + 3Q_iab*u_a(x,y)*u_b(x,y)]
 
-        cu = np.einsum("ia,xya->ixy", self.c, self.u)  # c_i * u(x,y)
-        uu = np.einsum("xya, xyb->xyab", self.u, self.u)  # u_a(x,y) * u_b(x,y)
-        Q_uu = np.einsum("iab, xyab->ixy", self.Q_iab, uu)  # Q_iab * u_a(x,y) * u_b(x,y)
-        self.N_eq = self.W[:, np.newaxis, np.newaxis] * self.rho[np.newaxis, :, :] * (
+        cu = jnp.einsum("ia,xya->ixy", self.c, state.u)  # c_i * u(x,y)
+        uu = jnp.einsum("xya, xyb->xyab", state.u, state.u)  # u_a(x,y) * u_b(x,y)
+        Q_uu = jnp.einsum("iab, xyab->ixy", self.Q_iab, uu)  # Q_iab * u_a(x,y) * u_b(x,y)
+        N_eq = self.W[:, jnp.newaxis, jnp.newaxis] * state.rho[jnp.newaxis, :, :] * (
             1 + 3 * cu + 3 * Q_uu
-        )
-
+        ) 
         
+        return state._replace(N_eq=N_eq)
 
-
-    def compute_C_eq(self):
-        #self.C_avg = np.sum(self.C, axis=0)
+    def compute_C_eq(self, state: BGKState) -> BGKState:
+        #self.C_avg = jnp.sum(self.C, axis=0)
         # C_eq_i = W_i * C_avg * (1 + 3*c_i·u)
         
-        self.C_eq = self.C_avg[np.newaxis, :, :]*self.W[:, np.newaxis, np.newaxis] * (
-            1 + 3 * np.einsum("ia,xya->ixy", self.c, self.u)
+        C_eq = self.state.C_avg[jnp.newaxis, :, :]*self.W[:, jnp.newaxis, jnp.newaxis] * (
+            1 + 3 * jnp.einsum("ia,xya->ixy", self.c, self.state.u)
         ) 
+        return state._replace(C_eq=C_eq)
     
     # Collision steps
     # ---------------
     # Verified without for loops, produce same result as with for loops
-    def collision_step(self):
+    def collision_step(self, state: BGKState) -> BGKState:
         # F = alpha*rho*g*C
-        F = self.alpha * self.rho[:, :, np.newaxis] * self.g[np.newaxis, np.newaxis, :] * self.C_avg[:, :, np.newaxis]
+        F = self.alpha * state.rho[:, :, jnp.newaxis] * self.g[jnp.newaxis, jnp.newaxis, :] * state.C_avg[:, :, jnp.newaxis]
         
         # N_i(x,y) += -omega*(N_i(x,y) - N_eq_i(x,y)) + 3*W_i*c_i*F(x,y)
-        self.N += -self.omega*(self.N - self.N_eq) + 3*self.W[:, np.newaxis, np.newaxis] * np.einsum("ia,xya->ixy", self.c, F)
-        pass
+        N = state.N + -self.omega*(state.N - state.N_eq) + 3*self.W[:, jnp.newaxis, jnp.newaxis] * jnp.einsum("ia,xya->ixy", self.c, F)
+        return state._replace(N=N)
         
-    # Collision step for N_i without with for loops
 
 
 
-    def collision_step_C(self):
-        self.C += -self.omega_d*(self.C - self.C_eq)
-        pass
+
+    def collision_step_C(self, state: BGKState) -> BGKState:
+        C = state.C -self.omega_d*(state.C - state.C_eq)
+        return state._replace(C=C)
     
     # Propagation steps
     # -----------------
-    def propagation_step_periodic(self):
+    def propagation_step_periodic(self, state: BGKState) -> BGKState:
         for i in range(9):    
-            self.N[i] = np.roll(self.N[i], shift=self.c_int[i], axis=(0, 1))
-        pass
+            state = state._replace(N=state.N.at[i].set(jnp.roll(state.N[i], shift=self.c_int[i], axis=(0, 1))))
+        return state
     
-    def propagation_step_C_periodic(self):
+    def propagation_step_C_periodic(self, state: BGKState) -> BGKState:
         for i in range(9):
-            self.C[i] = np.roll(self.C[i], shift=self.c_int[i], axis=(0, 1))
-        pass
+            state = state._replace(C=state.C.at[i].set(jnp.roll(state.C[i], shift=self.c_int[i], axis=(0, 1))))
+        return state
     
-    def propagation_step_noslip(self):
-        pass
+    def propagation_step_noslip(self, state: BGKState) -> BGKState:
+        return state
     
-    def propagation_step_C_noslip(self):
-        pass
+    def propagation_step_C_noslip(self, state: BGKState)-> BGKState:
+        return state
+    
+    
+    @functools.partial(jax.jit, static_argnums=0)
+    def step_periodic(self, state: BGKState) -> BGKState:
+        state = self.compute_equilibrium(state)
+        state = self.compute_C_eq(state)
+        state = self.collision_step(state)
+        state = self.collision_step_C(state)
+        state = self.propagation_step_periodic(state)
+        state = self.propagation_step_C_periodic(state)
+        return self.compute_Macroscopic_fields(state)
     
     # Iteration step for BGK model
     def iterate_BGK(self, bc_type = 'periodic'):
-        propagation_step, propagation_step_C = self.propagation_step_methods
-        
-        # Steps for BGK iteration:
-        # --------------------------
-
-        self.compute_equilibrium() # Verified
-        self.compute_C_eq()
-
-        # Colision steps
-        self.collision_step() # Verified
-        self.collision_step_C()
-        # propagation steps
-        propagation_step, propagation_step_C = self.propagation_step_methods
-        propagation_step() # Verified
-        propagation_step_C()
-        
-        # Compute the new rho, u and C_avg
-        self.compute_Macroscopic_fields() # Verified
+        self.state = self.step_periodic(self.state)
         pass
     
     def Simulate_BGK(self, num_iterations: int, save_interval: int = 1):
@@ -176,20 +190,19 @@ class BGK_D2Q9_Diffusion_Advection:
         
         saved_frames = num_iterations // save_interval + 1
         
-        u_t = np.zeros(shape=(saved_frames, self.lattice_dimensions[0], self.lattice_dimensions[1], 2))
-        C_t = np.zeros(shape=(saved_frames, self.lattice_dimensions[0], self.lattice_dimensions[1]))
+        u_t = np.zeros(shape=(0, self.lattice_dimensions[0], self.lattice_dimensions[1], 2))
+        C_t = np.zeros(shape=(0, self.lattice_dimensions[0], self.lattice_dimensions[1]))
 
-        
-        u_t[0] = self.u.copy()
-        C_t[0] = self.C_avg.copy()
+        u_t = jnp.append(u_t, self.state.u.copy()[jnp.newaxis, ...], axis=0)
+        C_t = jnp.append(C_t, self.state.C_avg.copy()[jnp.newaxis, ...], axis=0)
         
     
         
         for i in tqdm(range(num_iterations)):
             if (i+1) % save_interval == 0:
                 frame_index = (i+1) // save_interval
-                u_t[frame_index] = self.u.copy()
-                C_t[frame_index] = np.sum(self.C, axis=0)
+                u_t = jnp.append(u_t, self.state.u.copy()[jnp.newaxis, ...], axis=0)
+                C_t = jnp.append(C_t, self.state.C_avg.copy()[jnp.newaxis, ...], axis=0)
             self.iterate_BGK()  
         return u_t, C_t
 
@@ -204,10 +217,10 @@ class BGK_D2Q9_Diffusion_Advection:
     
     def plot_u(self):
                 # plot the initial velocity field with quiver
-        X, Y = np.meshgrid(np.arange(self.lattice_dimensions[0]), np.arange(self.lattice_dimensions[1]), indexing='ij')
+        X, Y = jnp.meshgrid(jnp.arange(self.lattice_dimensions[0]), jnp.arange(self.lattice_dimensions[1]), indexing='ij')
         
         plt.figure(figsize=(8, 6))
-        plt.quiver(X[::5, ::5], Y[::5, ::5], self.u[::5, ::5, 0], self.u[::5, ::5, 1], color='r')
+        plt.quiver(X[::5, ::5], Y[::5, ::5], self.state.u[::5, ::5, 0], self.state.u[::5, ::5, 1], color='r')
         plt.title('Initial Velocity Field')
         plt.xlabel('X')
         plt.ylabel('Y')
@@ -216,7 +229,7 @@ class BGK_D2Q9_Diffusion_Advection:
 
     def plot_C(self):
         # C[x,y], so need to transpose and flip vertically
-        C_plot = self.C_avg.T
+        C_plot = self.state.C_avg.T
         C_plot = C_plot[::-1, :]
         plt.imshow(C_plot, origin='lower', cmap='viridis')
         plt.colorbar(label='Concentration')
@@ -236,13 +249,13 @@ def D2omega_d(D: float) -> float:
     return 1/(3*D + 0.5)
 
 
-def animate_u_t(u: np.ndarray, fps = 10, quiver_interval=10, frame_jump=1, time_step_per_frame=1):
+def animate_u_t(u: jnp.ndarray, fps = 10, quiver_interval=10, frame_jump=1, time_step_per_frame=1):
     # u(t,x,y) = (u_x, u_y) 
-    U = np.linalg.norm(u, axis=3)
+    U = jnp.linalg.norm(u, axis=3)
 
     
     fig, ax = plt.subplots()
-    X, Y = np.meshgrid(np.arange(u.shape[1]), np.arange(u.shape[2]), indexing='ij')
+    X, Y = jnp.meshgrid(jnp.arange(u.shape[1]), jnp.arange(u.shape[2]), indexing='ij')
     quiver = ax.quiver(X[::quiver_interval, ::quiver_interval], Y[::quiver_interval, ::quiver_interval], u[0, ::quiver_interval, ::quiver_interval, 0], u[0, ::quiver_interval, ::quiver_interval, 1], color='k')
     Magnitude = ax.imshow(U[0].T[::-1, :], origin='lower', cmap='bwr', alpha=0.5)
     ax.set_title('Velocity Field Over Time')
@@ -264,7 +277,7 @@ def animate_u_t(u: np.ndarray, fps = 10, quiver_interval=10, frame_jump=1, time_
     ani = animation.FuncAnimation(fig, update, frames=range(0, u.shape[0], frame_jump), blit=False, interval=1000/fps)
     plt.show()
     
-def animate_C_t(C: np.ndarray, fps = 10, frame_jump=1, time_step_per_frame=1):
+def animate_C_t(C: jnp.ndarray, fps = 10, frame_jump=1, time_step_per_frame=1):
     # C(t,x,y)
 
     fig, ax = plt.subplots()
@@ -292,22 +305,22 @@ def animate_C_t(C: np.ndarray, fps = 10, frame_jump=1, time_step_per_frame=1):
 # ----------------------------
 
 def problem_1():
-    Lattice_dimensions = np.array([200, 200])
+    Lattice_dimensions = jnp.array([200, 200])
     delta = 5
     U = 0.1
     u_0y = 10e-5
-    k = 2*np.pi /( Lattice_dimensions[0]/10)
+    k = 2*jnp.pi /( Lattice_dimensions[0]/10)
     c_0 = 1.0
-    X,Y = np.meshgrid(np.arange(Lattice_dimensions[0]), np.arange(Lattice_dimensions[1]), indexing='ij')
+    X,Y = jnp.meshgrid(jnp.arange(Lattice_dimensions[0]), jnp.arange(Lattice_dimensions[1]), indexing='ij')
     
-    u_x = U*(np.tanh((Y - 0.25*Lattice_dimensions[0])/delta) - np.tanh((Y - 0.75*Lattice_dimensions[0])/delta) - 1)
-    u_y = u_0y * (np.sin(2*np.pi*X/Lattice_dimensions[0]))
-    x_hat = np.array([1.0, 0.0])
-    y_hat = np.array([0.0, 1.0])
-    u_0 = x_hat[np.newaxis, np.newaxis, :]*u_x[:, :, np.newaxis] + y_hat[np.newaxis, np.newaxis, :]*u_y[:, :, np.newaxis]
+    u_x = U*(jnp.tanh((Y - 0.25*Lattice_dimensions[0])/delta) - jnp.tanh((Y - 0.75*Lattice_dimensions[0])/delta) - 1)
+    u_y = u_0y * (jnp.sin(2*jnp.pi*X/Lattice_dimensions[0]))
+    x_hat = jnp.array([1.0, 0.0])
+    y_hat = jnp.array([0.0, 1.0])
+    u_0 = x_hat[jnp.newaxis, jnp.newaxis, :]*u_x[:, :, jnp.newaxis] + y_hat[jnp.newaxis, jnp.newaxis, :]*u_y[:, :, jnp.newaxis]
     
     
-    C_0 = c_0*(np.tanh((Y - 0.25*Lattice_dimensions[1])/delta) - np.tanh((Y - 0.75*Lattice_dimensions[1])/delta))
+    C_0 = c_0*(jnp.tanh((Y - 0.25*Lattice_dimensions[1])/delta) - jnp.tanh((Y - 0.75*Lattice_dimensions[1])/delta))
     
     
     w = nu2w(nu=0.01)
