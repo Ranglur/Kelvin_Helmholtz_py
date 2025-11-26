@@ -68,10 +68,6 @@ class BGK_D2Q9_Diffusion_Advection:
         """
         Initialize distributions from macroscopic fields.
 
-        Standard LBM practice for underdetermined u→N_i is to set the
-        populations to their equilibrium with a chosen density field (often
-        constant). Likewise for the passive scalar, set C_i to scalar-equilibrium.
-
         Parameters
         - u: array (Nx, Ny, 2), initial velocity field
         - C_init: array (Nx, Ny), initial scalar (concentration/temperature)
@@ -171,6 +167,7 @@ class BGK_D2Q9_Diffusion_Advection:
         C_streamed = jax.vmap(roll_dir, in_axes=(0, 0, 0))(state.C, shift_x, shift_y)
         return state._replace(C=C_streamed)
     
+    # Not implemented (yet)
     def _propagation_step_noslip(self, state: BGKState) -> BGKState:
         return state
     
@@ -294,7 +291,7 @@ class BGK_D2Q9_Diffusion_Advection:
         
         fig, ax = plt.subplots(figsize=(8, 6))
         ax.quiver(X[::quiver_interval, ::quiver_interval], Y[::quiver_interval, ::quiver_interval], self.state.u[::quiver_interval, ::quiver_interval, 0], self.state.u[::quiver_interval, ::quiver_interval, 1], color='k')
-        ax.imshow(jnp.linalg.norm(self.state.u, axis=2).T[::-1, :], origin='lower', cmap='bwr', alpha=0.5)
+        ax.imshow(jnp.linalg.norm(self.state.u, axis=2).T[::-1, :], origin='lower', cmap='Reds', alpha=0.5)
         ax.set_title('Initial Velocity Field')
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
@@ -311,6 +308,7 @@ class BGK_D2Q9_Diffusion_Advection:
         plt.xlabel('X')
         plt.ylabel('Y')
         plt.show()
+
 
 
 
@@ -556,9 +554,39 @@ def problem_2():
     
     vorticity_t = get_vorticity(u_t)
 
-    animate_u_t(u_t, fps=5, time_step_per_frame=100, filename='velocity_field.gif')
-    animate_C_t(C_t, fps=5, time_step_per_frame=100, filename='concentration_field.gif')
-    animate_vorticity_t(vorticity_t, fps=5, time_step_per_frame=100, filename='vorticity_field.gif')
+    # animate_u_t(u_t, fps=5, time_step_per_frame=100, filename='velocity_field.gif')
+    # animate_C_t(C_t, fps=5, time_step_per_frame=100, filename='concentration_field.gif')
+    # animate_vorticity_t(vorticity_t, fps=5, time_step_per_frame=100, filename='vorticity_field.gif')
+
+    # Plots of velocity field at different time steps
+    for index in [0, 10, 15, 20]:
+        U = jnp.linalg.norm(u_t, axis=3)
+    
+        quiver_interval = 10    
+        fig, ax = plt.subplots()
+        X, Y = jnp.meshgrid(jnp.arange(u_t.shape[1]), jnp.arange(u_t.shape[2]), indexing='ij')
+        quiver = ax.quiver(X[::quiver_interval, ::quiver_interval], Y[::quiver_interval, ::quiver_interval], u_t[index, ::quiver_interval, ::quiver_interval, 0], u_t[index, ::quiver_interval, ::quiver_interval, 1], color='k')
+        Magnitude = ax.imshow(U[index].T[::-1, :], origin='lower', cmap='Reds', alpha=0.5, interpolation='bilinear')
+        ax.set_title(f'Velocity Field at t = {index*250}')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.axis('equal')
+        cb = fig.colorbar(Magnitude, ax=ax, label='Velocity Magnitude')
+        plt.savefig(f'velocity_field_{index*250}.pdf')
+        plt.show()
+
+       
+        fig, ax = plt.subplots()
+        im = ax.imshow(vorticity_t[index].T[::-1, :], origin='lower', cmap='bwr', interpolation='bilinear', norm=CenteredNorm(vcenter=0))
+        ax.set_title(f'Vorticity at time step {index*250}')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        cb = fig.colorbar(im, ax=ax, label='Vorticity')   
+        str = f'vorticity_field_{index*250}.pdf'
+        plt.savefig(str)
+
+        
+
 
 def problem_4():
     c_0 = 1.0
@@ -566,7 +594,7 @@ def problem_4():
     delta = 5
     U = 0.1
     k = 2*jnp.pi /( Lattice_dimensions[0])
-    save_interval = 50
+    save_interval = 25
     System, u_0, C_0 = initialization_Helmholtz(Lattice_dimensions=Lattice_dimensions, delta=delta, rho=1, U=U, c_0=c_0)
 
     u_t, C_t= System.Simulate_BGK(num_iterations=3000, save_interval=save_interval)
@@ -603,9 +631,9 @@ def problem_4():
 
     eta = jnp.max(y_mid_relative, axis=1) - jnp.min(y_mid_relative, axis=1)
     t = jnp.arange(u_t.shape[0])*save_interval  # time steps corresponding to saved frames
-    kUt = jnp.copy(t)*k*U/2  # time steps corresponding to saved frames
-    plt.plot(t[10:], jnp.log(eta[10:]), label=r'log(\eta)')
-    plt.plot(t[10:], kUt[10:], label='Reference: k\Delta U t/2')
+    kUt = jnp.copy(t)*k*U  # time steps corresponding to saved frames
+    plt.plot(t[5:], jnp.log(eta[5:]), label=r'log(\eta)')
+    plt.plot(t[5:], kUt[5:], label=r'Reference: k\Delta U_0 t')
     plt.xlabel('time [iterations]')
     plt.legend()
     plt.ylabel('Amplitude of Interface Perturbation')
@@ -619,14 +647,14 @@ def problem_6():
     Lattice_dimensions = jnp.array([200, 200])
     delta = 1
     System, u_0, C_0 = initialization_Helmholtz(Lattice_dimensions=Lattice_dimensions, delta=delta, rho=1, U=0.1)
-    u_t, C_t = System.Simulate_BGK(num_iterations=12500, save_interval=125)
-    
-    animate_u_t(u_t, fps=5, time_step_per_frame=125)
-    
-    t = jnp.arange(u_t.shape[0])*125  # time steps corresponding to saved frames
-    S_dot = entropy_production(C_t) 
-    S_t = jnp.cumsum(S_dot)*125  # Cumulative entropy production
-    
+
+    u_t, C_t = System.Simulate_BGK(num_iterations=12500, save_interval=25)
+
+
+
+    S_dot = entropy_production(C_t)
+    S_t = jnp.cumsum(S_dot)*25  # Cumulative entropy production
+    t = jnp.arange(S_dot.shape[0])*25  # time steps corresponding to saved frames
 
     
     plt.plot(t, S_dot, label="Entropy Production S'/(k_b*D)")
@@ -643,6 +671,24 @@ def problem_6():
     plt.title('Cumulative Entropy Production Over Time')
     plt.savefig('cumulative_entropy_production.pdf')
     plt.show()
+
+    
+
+    for index in [80, 220]:
+        U = jnp.linalg.norm(u_t, axis=3)
+    
+        quiver_interval = 10    
+        fig, ax = plt.subplots()
+        X, Y = jnp.meshgrid(jnp.arange(u_t.shape[1]), jnp.arange(u_t.shape[2]), indexing='ij')
+        quiver = ax.quiver(X[::quiver_interval, ::quiver_interval], Y[::quiver_interval, ::quiver_interval], u_t[index, ::quiver_interval, ::quiver_interval, 0], u_t[index, ::quiver_interval, ::quiver_interval, 1], color='k')
+        Magnitude = ax.imshow(U[index].T[::-1, :], origin='lower', cmap='Reds', alpha=0.5, interpolation='bilinear')
+        ax.set_title(f'Velocity Field at t = {index*25}')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.axis('equal')
+        cb = fig.colorbar(Magnitude, ax=ax, label='Velocity Magnitude')
+        plt.savefig(f'velocity_field_{index*25}.pdf')
+        plt.show()
 
     pass
 
@@ -710,7 +756,7 @@ if __name__ == "__main__":
     problem_4() 
     
     problem_6()
-    problem_6_random()
+    #problem_6_random()
 
     
     pass
